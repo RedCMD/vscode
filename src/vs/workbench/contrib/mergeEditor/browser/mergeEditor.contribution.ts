@@ -3,19 +3,22 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { BugIndicatingError } from 'vs/base/common/errors';
+import { Disposable, DisposableStore } from 'vs/base/common/lifecycle';
 import { localize } from 'vs/nls';
 import { registerAction2 } from 'vs/platform/actions/common/actions';
 import { Extensions, IConfigurationRegistry } from 'vs/platform/configuration/common/configurationRegistry';
 import { SyncDescriptor } from 'vs/platform/instantiation/common/descriptors';
 import { Registry } from 'vs/platform/registry/common/platform';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from 'vs/workbench/browser/editor';
-import { Extensions as WorkbenchExtensions, IWorkbenchContributionsRegistry } from 'vs/workbench/common/contributions';
+import { Extensions as WorkbenchExtensions, IWorkbenchContribution, IWorkbenchContributionsRegistry } from 'vs/workbench/common/contributions';
 import { EditorExtensions, IEditorFactoryRegistry } from 'vs/workbench/common/editor';
 import { AcceptAllInput1, AcceptAllInput2, CompareInput1WithBaseCommand, CompareInput2WithBaseCommand, GoToNextUnhandledConflict, GoToPreviousUnhandledConflict, OpenBaseFile, OpenMergeEditor, OpenResultResource, ResetDirtyConflictsToBaseCommand, ResetToBaseAndAutoMergeCommand, SetColumnLayout, SetMixedLayout, ShowHideBase, ToggleActiveConflictInput1, ToggleActiveConflictInput2 } from 'vs/workbench/contrib/mergeEditor/browser/commands/commands';
 import { MergeEditorCopyContentsToJSON, MergeEditorSaveContentsToFolder, MergeEditorLoadContentsFromFolder } from 'vs/workbench/contrib/mergeEditor/browser/commands/devCommands';
 import { MergeEditorInput } from 'vs/workbench/contrib/mergeEditor/browser/mergeEditorInput';
 import { MergeEditor, MergeEditorResolverContribution, MergeEditorOpenHandlerContribution } from 'vs/workbench/contrib/mergeEditor/browser/view/mergeEditor';
 import { LifecyclePhase } from 'vs/workbench/services/lifecycle/common/lifecycle';
+import { IWorkingCopyEditorService } from 'vs/workbench/services/workingCopy/common/workingCopyEditorService';
 import { MergeEditorSerializer } from './mergeEditorSerializer';
 
 Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
@@ -82,3 +85,23 @@ Registry
 Registry
 	.as<IWorkbenchContributionsRegistry>(WorkbenchExtensions.Workbench)
 	.registerWorkbenchContribution(MergeEditorResolverContribution, 'MergeEditorResolverContribution', LifecyclePhase.Starting);
+/*
+class MergeEditorWorkbenchContribution extends Disposable implements IWorkbenchContribution {
+	constructor(@IWorkingCopyEditorService private readonly _workingCopyEditorService: IWorkingCopyEditorService) {
+		super();
+
+		this._register(
+			_workingCopyEditorService.registerHandler({
+				createEditor(workingCopy) {
+					throw new BugIndicatingError('not supported');
+				},
+				handles(workingCopy) {
+					return workingCopy.typeId === '';
+				},
+				isOpen(workingCopy, editor) {
+					return workingCopy.resource.toString() === that._model?.resultTextModel.uri.toString();
+				},
+			}));
+	}
+}
+*/

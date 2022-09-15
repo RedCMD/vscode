@@ -7,22 +7,28 @@ import { DisposableStore } from 'vs/base/common/lifecycle';
 import { basename, isEqual } from 'vs/base/common/resources';
 import Severity from 'vs/base/common/severity';
 import { URI } from 'vs/base/common/uri';
-import { ITextModelService } from 'vs/editor/common/services/resolverService';
+import { IResolvedTextEditorModel, ITextModelService } from 'vs/editor/common/services/resolverService';
 import { localize } from 'vs/nls';
 import { ConfirmResult, IDialogService } from 'vs/platform/dialogs/common/dialogs';
 import { IFileService } from 'vs/platform/files/common/files';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { ILabelService } from 'vs/platform/label/common/label';
-import { DEFAULT_EDITOR_ASSOCIATION, EditorInputCapabilities, IEditorIdentifier, IResourceMergeEditorInput, isResourceMergeEditorInput, IUntypedEditorInput } from 'vs/workbench/common/editor';
+import { DEFAULT_EDITOR_ASSOCIATION, EditorInputCapabilities, IEditorIdentifier, IResourceMergeEditorInput, IRevertOptions, isResourceMergeEditorInput, IUntypedEditorInput } from 'vs/workbench/common/editor';
 import { EditorInput, IEditorCloseHandler } from 'vs/workbench/common/editor/editorInput';
 import { AbstractTextResourceEditorInput } from 'vs/workbench/common/editor/textResourceEditorInput';
 import { MergeDiffComputer } from 'vs/workbench/contrib/mergeEditor/browser/model/diffComputer';
 import { InputData, MergeEditorModel } from 'vs/workbench/contrib/mergeEditor/browser/model/mergeEditorModel';
 import { IEditorService } from 'vs/workbench/services/editor/common/editorService';
-import { ILanguageSupport, ITextFileEditorModel, ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
-import { autorun } from 'vs/base/common/observable';
+import { ILanguageSupport, ITextFileEditorModel, ITextFileSaveOptions, ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
+import { autorun, derived, observableFromEvent } from 'vs/base/common/observable';
 import { WorkerBasedDocumentDiffProvider } from 'vs/editor/browser/widget/workerBasedDocumentDiffProvider';
 import { ProjectedDiffComputer } from 'vs/workbench/contrib/mergeEditor/browser/model/projectedDocumentDiffProvider';
+import { IModelService } from 'vs/editor/common/services/model';
+import { Event } from 'vs/base/common/event';
+import { ResultFileProvider } from 'vs/workbench/contrib/mergeEditor/browser/fileSystemProvider';
+import { VSBuffer } from 'vs/base/common/buffer';
+import { IWorkingCopyEditorService } from 'vs/workbench/services/workingCopy/common/workingCopyEditorService';
+import { BugIndicatingError } from 'vs/base/common/errors';
 
 export class MergeEditorInputData {
 	constructor(
@@ -38,7 +44,10 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 	static readonly ID = 'mergeEditor.Input';
 
 	private _model?: MergeEditorModel;
+	private _result: IResolvedTextEditorModel | undefined = undefined;
+	private _temporaryResultModelAlternativeVersionId: number = -1;
 	private _outTextModel?: ITextFileEditorModel;
+	private _isDirty = false;
 
 	override closeHandler: MergeEditorCloseHandler | undefined;
 
@@ -52,7 +61,10 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 		@IEditorService editorService: IEditorService,
 		@ITextFileService textFileService: ITextFileService,
 		@ILabelService labelService: ILabelService,
-		@IFileService fileService: IFileService
+		@IFileService fileService: IFileService,
+		@IModelService private readonly _modelService: IModelService,
+		@IFileService private readonly _fileService: IFileService,
+		@IWorkingCopyEditorService private readonly _workingCopyEditorService: IWorkingCopyEditorService
 	) {
 		super(result, undefined, editorService, textFileService, labelService, fileService);
 
@@ -62,8 +74,8 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 			if (isEqual(result, model.resource)) {
 				modelListener.clear();
 				this._outTextModel = model;
-				modelListener.add(model.onDidChangeDirty(() => this._onDidChangeDirty.fire()));
-				modelListener.add(model.onDidSaveError(() => this._onDidChangeDirty.fire()));
+				//modelListener.add(model.onDidChangeDirty(() => this._onDidChangeDirty.fire()));
+				//modelListener.add(model.onDidSaveError(() => this._onDidChangeDirty.fire()));
 
 				modelListener.add(model.onDidChangeReadonly(() => this._onDidChangeCapabilities.fire()));
 
@@ -76,6 +88,21 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 		textFileService.files.onDidCreate(handleDidCreate, this, modelListener);
 		textFileService.files.models.forEach(handleDidCreate);
 		this._store.add(modelListener);
+
+		const that = this;
+
+		this._register(
+			_workingCopyEditorService.registerHandler({
+				createEditor(workingCopy) {
+					throw new BugIndicatingError('not supported');
+				},
+				handles(workingCopy) {
+					return workingCopy.typeId === '' && workingCopy.resource.toString() === that._model?.resultTextModel.uri.toString();
+				},
+				isOpen(workingCopy, editor) {
+					return workingCopy.resource.toString() === that._model?.resultTextModel.uri.toString();
+				},
+			}));
 	}
 
 	override dispose(): void {
@@ -91,7 +118,7 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 	}
 
 	override get capabilities(): EditorInputCapabilities {
-		return super.capabilities | EditorInputCapabilities.MultipleEditors;
+		return super.capabilities | EditorInputCapabilities.MultipleEditors | EditorInputCapabilities.Untitled;
 	}
 
 	override getName(): string {
@@ -122,9 +149,29 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 				toInputData(this.input1),
 				toInputData(this.input2),
 			]);
+			this._result = result.object;
 
+			const resultFileProvider = this._instaService.createInstance(ResultFileProvider);
+			const tempResultUri = await resultFileProvider.getTempResultFileUri(result.object.textEditorModel.uri);
+			await this._fileService.createFile(tempResultUri, VSBuffer.fromString(''), { overwrite: true });
+
+			const tempResult = await this._textModelService.createModelReference(tempResultUri);
+			this._store.add(tempResult);
+
+			await tempResult.object.resolve();
+			const temporaryResultModel = tempResult.object.textEditorModel;
+			/*
+			const temporaryResultModel = this._modelService.createModel(
+				result.object.textEditorModel.getValue(),
+				{ languageId: result.object.textEditorModel.getLanguageId(), onDidChange: Event.None },
+				result.object.textEditorModel.uri.with({ scheme: 'merge-editor' }),
+				false
+			);*/
+
+			this._store.add(temporaryResultModel);
 			this._store.add(base);
 			this._store.add(result);
+
 
 			const diffProvider = this._instaService.createInstance(WorkerBasedDocumentDiffProvider);
 			this._model = this._instaService.createInstance(
@@ -132,12 +179,9 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 				base.object.textEditorModel,
 				input1Data,
 				input2Data,
-				result.object.textEditorModel,
+				temporaryResultModel,
 				this._instaService.createInstance(MergeDiffComputer, diffProvider),
-				this._instaService.createInstance(MergeDiffComputer, this._instaService.createInstance(ProjectedDiffComputer, diffProvider)),
-				{
-					resetUnknownOnInitialization: false
-				},
+				this._instaService.createInstance(MergeDiffComputer, this._instaService.createInstance(ProjectedDiffComputer, diffProvider))
 			);
 			this._store.add(this._model);
 
@@ -148,11 +192,33 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 				this.closeHandler = value ? closeHandler : undefined;
 			}));
 
+			this._isDirty = false;
+
 			await this._model.onInitialized;
 
+			this._temporaryResultModelAlternativeVersionId = temporaryResultModel.getAlternativeVersionId();
+			this._store.add(temporaryResultModel.onDidChangeContent(() => {
+				this.updateIsDirty();
+			}));
 		}
 
 		return this._model;
+	}
+
+	private updateIsDirty() {
+		const isDirty = this._model!.resultTextModel.getAlternativeVersionId() !== this._temporaryResultModelAlternativeVersionId;
+		if (isDirty !== this._isDirty) {
+			this._isDirty = isDirty;
+			this._onDidChangeDirty.fire();
+		}
+	}
+
+	override async save(group: number, options?: ITextFileSaveOptions | undefined): Promise<IUntypedEditorInput | undefined> {
+		/*this._temporaryResultModelAlternativeVersionId = this._model!.resultTextModel.getAlternativeVersionId();
+		this.updateIsDirty();
+		this._outTextModel!.textEditorModel!.setValue(this._model!.getResultValueWithConflictMarkers());
+		this._outTextModel!.save();*/
+		return undefined;
 	}
 
 	override toUntyped(): IResourceMergeEditorInput {
@@ -188,10 +254,16 @@ export class MergeEditorInput extends AbstractTextResourceEditorInput implements
 		return false;
 	}
 
+	override async revert(group: number, options?: IRevertOptions | undefined): Promise<void> {
+		// We don't really need to reset something, just clear the dirty flag
+		//this._temporaryResultModelAlternativeVersionId = this._model!.resultTextModel.getAlternativeVersionId();
+		this.updateIsDirty();
+	}
+
 	// ---- FileEditorInput
 
 	override isDirty(): boolean {
-		return Boolean(this._outTextModel?.isDirty());
+		return this._isDirty;
 	}
 
 	setLanguageId(languageId: string, source?: string): void {
@@ -306,7 +378,7 @@ class MergeEditorCloseHandler implements IEditorCloseHandler {
 		if (choice === options.cancelId) {
 			return ConfirmResult.CANCEL;
 		} else {
-			return ConfirmResult.SAVE;
+			return ConfirmResult.DONT_SAVE;
 		}
 	}
 }
