@@ -11,28 +11,32 @@ import { Emitter, Event } from 'vs/base/common/event';
 import { MarshalledId } from 'vs/base/common/marshallingIds';
 import { ServicesAccessor } from 'vs/editor/browser/editorExtensions';
 import { createActionViewItem, createAndFillInActionBarActions, MenuEntryActionViewItem } from 'vs/platform/actions/browser/menuEntryActionViewItem';
+import { HiddenItemStrategy, WorkbenchToolBar } from 'vs/platform/actions/browser/toolbar';
 import { IMenu, IMenuService, MenuId, MenuItemAction } from 'vs/platform/actions/common/actions';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
+import { IContextMenuService } from 'vs/platform/contextview/browser/contextView';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { INotebookCellActionContext } from 'vs/workbench/contrib/notebook/browser/controller/coreActions';
 import { ICellViewModel, INotebookEditorDelegate } from 'vs/workbench/contrib/notebook/browser/notebookBrowser';
-import { CodiconActionViewItem } from 'vs/workbench/contrib/notebook/browser/view/cellParts/cellActionView';
 import { CellPart } from 'vs/workbench/contrib/notebook/browser/view/cellPart';
+import { CodiconActionViewItem } from 'vs/workbench/contrib/notebook/browser/view/cellParts/cellActionView';
 import { registerStickyScroll } from 'vs/workbench/contrib/notebook/browser/view/cellParts/stickyScroll';
-import { HiddenItemStrategy, MenuWorkbenchToolBar, WorkbenchToolBar } from 'vs/platform/actions/browser/toolbar';
 
 export class BetweenCellToolbar extends CellPart {
-	private _betweenCellToolbar!: MenuWorkbenchToolBar;
+	private _betweenCellToolbar!: ToolBar;
 
 	constructor(
 		private readonly _notebookEditor: INotebookEditorDelegate,
 		_titleToolbarContainer: HTMLElement,
 		private readonly _bottomCellToolbarContainer: HTMLElement,
 		@IInstantiationService instantiationService: IInstantiationService,
+		@IContextMenuService contextMenuService: IContextMenuService,
+		@IContextKeyService contextKeyService: IContextKeyService,
+		@IMenuService menuService: IMenuService
 	) {
 		super();
 
-		this._betweenCellToolbar = this._register(instantiationService.createInstance(MenuWorkbenchToolBar, this._bottomCellToolbarContainer, this._notebookEditor.creationOptions.menuIds.cellInsertToolbar, {
+		this._betweenCellToolbar = this._register(instantiationService.createInstance(WorkbenchToolBar, this._bottomCellToolbarContainer, {
 			actionViewItemProvider: action => {
 				if (action instanceof MenuItemAction) {
 					if (this._notebookEditor.notebookOptions.getLayoutConfiguration().insertToolbarAlignment === 'center') {
@@ -43,14 +47,22 @@ export class BetweenCellToolbar extends CellPart {
 				}
 
 				return undefined;
-			},
-			toolbarOptions: {
-				primaryGroup: g => /^inline/.test(g),
-			},
-			menuOptions: {
-				shouldForwardArgs: true
 			}
 		}));
+
+		const menu = this._register(menuService.createMenu(this._notebookEditor.creationOptions.menuIds.cellInsertToolbar, contextKeyService));
+		const updateActions = () => {
+			const actions = getCellToolbarActions(menu);
+			this._betweenCellToolbar.setActions(actions.primary, actions.secondary);
+		};
+
+		this._register(menu.onDidChange(() => updateActions()));
+		this._register(this._notebookEditor.notebookOptions.onDidChangeOptions((e) => {
+			if (e.insertToolbarAlignment) {
+				updateActions();
+			}
+		}));
+		updateActions();
 	}
 
 	updateContext(context: INotebookCellActionContext) {
